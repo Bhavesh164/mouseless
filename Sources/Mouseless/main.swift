@@ -296,6 +296,7 @@ final class MouseController {
             mouseButton: button
         )
         event?.setIntegerValueField(.mouseEventClickState, value: clickCount)
+        event?.flags = []
         event?.post(tap: .cghidEventTap)
     }
 
@@ -403,7 +404,7 @@ final class AccessibilityClickDetector {
 
     private func scanPoints(around point: CGPoint) -> [CGPoint] {
         var points = [point]
-        let offsets: [CGFloat] = [5, 10, 16, 24, 36, 52]
+        let offsets: [CGFloat] = [3, 6, 10]
         for offset in offsets {
             points.append(contentsOf: [
                 CGPoint(x: point.x - offset, y: point.y),
@@ -660,21 +661,10 @@ final class OverlayController {
 
     private func clickIfAccessibleTarget() {
         let target = virtualCursor
-        let activation = AccessibilityClickDetector.shared.activateClickableTarget(at: target)
-        guard case .notFound = activation else {
-            hide()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [mouse] in
-                switch activation {
-                case .click(let point):
-                    mouse.click(at: point)
-                case .notFound:
-                    break
-                }
-            }
-            return
-        }
-
         hide()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [mouse] in
+            mouse.click(at: target)
+        }
     }
 
     private enum ScrollDirection {

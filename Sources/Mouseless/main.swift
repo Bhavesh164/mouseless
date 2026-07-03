@@ -1394,7 +1394,14 @@ final class StatusBarController {
     private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
     init(showOverlay: @escaping () -> Void, toggleFreeMode: @escaping () -> Void, preferences: @escaping () -> Void) {
-        item.button?.title = "Mouseless"
+        if let icon = loadTrayIcon() {
+            icon.size = NSSize(width: 18, height: 18)
+            icon.isTemplate = true
+            item.button?.image = icon
+            item.button?.imagePosition = .imageOnly
+        } else {
+            item.button?.title = "Mouseless"
+        }
         item.button?.toolTip = appName
 
         let menu = NSMenu()
@@ -1405,6 +1412,13 @@ final class StatusBarController {
         menu.addItem(.separator())
         menu.addCallbackItem(title: "Quit \(appName)") { NSApp.terminate(nil) }
         item.menu = menu
+    }
+
+    private func loadTrayIcon() -> NSImage? {
+        if let path = Bundle.main.path(forResource: "TrayIcon", ofType: "png") {
+            return NSImage(contentsOfFile: path)
+        }
+        return nil
     }
 }
 

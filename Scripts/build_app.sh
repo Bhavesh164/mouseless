@@ -39,6 +39,10 @@ if [ -f "$ROOT/Resources/AppIcon.icns" ]; then
   cp "$ROOT/Resources/AppIcon.icns" "$RESOURCES/AppIcon.icns"
 fi
 
+if [ -f "$ROOT/Resources/TrayIcon.png" ]; then
+  cp "$ROOT/Resources/TrayIcon.png" "$RESOURCES/TrayIcon.png"
+fi
+
 if command -v codesign >/dev/null 2>&1; then
   codesign --force --deep --sign - "$APP"
 fi

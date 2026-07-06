@@ -271,8 +271,6 @@ final class MouseController {
     func moveDrag(to appKitPoint: CGPoint) {
         if isDragging {
             postMouse(type: .leftMouseDragged, at: appKitPoint, button: dragButton)
-        } else {
-            move(to: appKitPoint)
         }
     }
 
@@ -335,18 +333,16 @@ final class MouseController {
 }
 
 enum CoordinateSpace {
-    static var desktopBounds: CGRect {
-        NSScreen.screens.map(\.frame).reduce(CGRect.null) { $0.union($1) }
+    static var primaryScreenHeight: CGFloat {
+        NSScreen.screens.first?.frame.height ?? 0
     }
 
     static func appKitToQuartz(_ point: CGPoint) -> CGPoint {
-        let bounds = desktopBounds
-        return CGPoint(x: point.x, y: bounds.maxY - point.y)
+        return CGPoint(x: point.x, y: primaryScreenHeight - point.y)
     }
 
     static func quartzToAppKit(_ point: CGPoint) -> CGPoint {
-        let bounds = desktopBounds
-        return CGPoint(x: point.x, y: bounds.maxY - point.y)
+        return CGPoint(x: point.x, y: primaryScreenHeight - point.y)
     }
 }
 
@@ -413,21 +409,20 @@ final class AccessibilityClickDetector {
         var candidates: [Candidate] = []
         var seen = Set<String>()
         for (order, point) in scanPoints(around: appKitPoint).enumerated() {
-            for candidatePoint in [CoordinateSpace.appKitToQuartz(point), point] {
-                guard let element = element(at: candidatePoint),
-                      let clickableElement = clickableAncestor(of: element)
-                else { continue }
+            let candidatePoint = CoordinateSpace.appKitToQuartz(point)
+            guard let element = element(at: candidatePoint),
+                  let clickableElement = clickableAncestor(of: element)
+            else { continue }
 
-                let key = identityKey(for: clickableElement)
-                guard !seen.contains(key) else { continue }
-                seen.insert(key)
-                candidates.append(Candidate(
-                    element: clickableElement,
-                    clickPoint: clickPoint(for: clickableElement),
-                    area: frameArea(for: clickableElement),
-                    order: order
-                ))
-            }
+            let key = identityKey(for: clickableElement)
+            guard !seen.contains(key) else { continue }
+            seen.insert(key)
+            candidates.append(Candidate(
+                element: clickableElement,
+                clickPoint: clickPoint(for: clickableElement),
+                area: frameArea(for: clickableElement),
+                order: order
+            ))
         }
 
         return candidates.sorted {
@@ -922,8 +917,8 @@ final class OverlayView: NSView {
     }
 
     private func precisionGridRect(around localRegion: CGRect, snapshot: OverlaySnapshot) -> CGRect {
-        let width = min(bounds.width - 48, max(200, CGFloat(snapshot.columns) * 40))
-        let height = min(bounds.height - 96, max(150, CGFloat(snapshot.rows) * 32))
+        let width = min(bounds.width - 48, max(160, CGFloat(snapshot.columns) * 32))
+        let height = min(bounds.height - 96, max(120, CGFloat(snapshot.rows) * 24))
         var origin = CGPoint(
             x: localRegion.midX - width / 2,
             y: localRegion.midY - height / 2
@@ -1578,7 +1573,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, EventTapDelegate {
     }
 
     func handleKeyboardEvent(type: CGEventType, keyCode: CGKeyCode, label: String?, flags: CGEventFlags, isRepeat: Bool) -> Bool {
-        guard type == .keyDown || type == .keyUp else { return false }
+        guard type == .keyDown || type == .keyUp else {
+            if type == .flagsChanged && overlay.isVisible {
+                return true
+            }
+            return false
+        }
         guard let label else { return false }
 
         if type == .keyDown && settingsStore.settings.overlayHotkey.matches(label: label, flags: flags) {
@@ -1587,6 +1587,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, EventTapDelegate {
         }
 
         if overlay.isVisible {
+            if flags.contains(.maskCommand) || flags.contains(.maskControl) {
+                return false
+            }
             overlay.handle(type: type, label: label)
             return true
         }

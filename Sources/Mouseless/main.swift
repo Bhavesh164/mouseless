@@ -2,6 +2,7 @@ import AppKit
 import ApplicationServices
 import CoreGraphics
 import Foundation
+import ServiceManagement
 
 private let appName = "Mouseless"
 
@@ -218,7 +219,7 @@ final class EventTapManager {
     private func showPermissionAlert() {
         let alert = NSAlert()
         alert.messageText = "\(appName) needs Accessibility permission"
-        alert.informativeText = "Open System Settings > Privacy & Security > Accessibility and enable \(appName), then restart the app."
+        alert.informativeText = "Open System Settings > Privacy & Security > Accessibility and enable \(appName). It will start working automatically once granted."
         alert.addButton(withTitle: "OK")
         alert.runModal()
     }
@@ -350,6 +351,7 @@ enum CoordinateSpace {
 
 final class AccessibilityClickDetector {
     enum Activation {
+        case press(AXUIElement, CGPoint)
         case click(CGPoint)
         case notFound
     }
@@ -381,11 +383,29 @@ final class AccessibilityClickDetector {
 
     func activateClickableTarget(at appKitPoint: CGPoint) -> Activation {
         let candidates = clickableCandidates(around: appKitPoint)
-        if let point = candidates.compactMap(\.clickPoint).first {
-            return .click(point)
+        if let best = candidates.first {
+            if let point = best.clickPoint {
+                return .press(best.element, point)
+            }
         }
 
         return .notFound
+    }
+
+    func performActivation(_ activation: Activation, mouse: MouseController) -> Bool {
+        switch activation {
+        case let .press(element, point):
+            if AXUIElementPerformAction(element, pressAction as CFString) == .success {
+                return true
+            }
+            mouse.click(at: point)
+            return true
+        case let .click(point):
+            mouse.click(at: point)
+            return true
+        case .notFound:
+            return false
+        }
     }
 
     private func clickableCandidates(around appKitPoint: CGPoint) -> [Candidate] {
@@ -678,7 +698,8 @@ final class OverlayController {
         let target = virtualCursor
         hide()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [mouse] in
-            mouse.click(at: target)
+            let activation = AccessibilityClickDetector.shared.activateClickableTarget(at: target)
+            _ = AccessibilityClickDetector.shared.performActivation(activation, mouse: mouse)
         }
     }
 
@@ -1162,6 +1183,7 @@ final class PreferencesWindowController: NSWindowController {
     private let opacitySlider = NSSlider(value: 0.72, minValue: 0.25, maxValue: 0.95, target: nil, action: nil)
     private let speedSlider = NSSlider(value: 26, minValue: 6, maxValue: 90, target: nil, action: nil)
     private let continuousCheckbox = NSButton(checkboxWithTitle: "Keep overlay visible after actions", target: nil, action: nil)
+    private let launchAtStartupCheckbox = NSButton(checkboxWithTitle: "Launch at Startup", target: nil, action: nil)
     private let shortcutKeyField = NSTextField(string: "U")
     private let shortcutCommandCheckbox = NSButton(checkboxWithTitle: "Command", target: nil, action: nil)
     private let shortcutOptionCheckbox = NSButton(checkboxWithTitle: "Option", target: nil, action: nil)
@@ -1214,6 +1236,8 @@ final class PreferencesWindowController: NSWindowController {
         speedSlider.action = #selector(updateSpeed)
         continuousCheckbox.target = self
         continuousCheckbox.action = #selector(updateContinuous)
+        launchAtStartupCheckbox.target = self
+        launchAtStartupCheckbox.action = #selector(updateLaunchAtStartup)
         shortcutKeyField.target = self
         shortcutKeyField.action = #selector(updateShortcut)
         shortcutCommandCheckbox.target = self
@@ -1234,6 +1258,7 @@ final class PreferencesWindowController: NSWindowController {
         stack.addArrangedSubview(shortcutRow())
         stack.addArrangedSubview(quitGridKeyRow())
         stack.addArrangedSubview(continuousCheckbox)
+        stack.addArrangedSubview(launchAtStartupCheckbox)
 
         let hint = NSTextField(labelWithString: "Overlay shortcut defaults to Option+U. Free mode is available from the status-bar menu.")
         hint.font = .systemFont(ofSize: 12)
@@ -1325,6 +1350,7 @@ final class PreferencesWindowController: NSWindowController {
         opacitySlider.doubleValue = settings.overlayOpacity
         speedSlider.doubleValue = settings.freeModeStep
         continuousCheckbox.state = settings.continuousMode ? .on : .off
+        launchAtStartupCheckbox.state = LaunchAtStartup.isEnabled ? .on : .off
         shortcutKeyField.stringValue = settings.overlayHotkey.key
         shortcutCommandCheckbox.state = settings.overlayHotkey.command ? .on : .off
         shortcutOptionCheckbox.state = settings.overlayHotkey.option ? .on : .off
@@ -1358,6 +1384,12 @@ final class PreferencesWindowController: NSWindowController {
     @objc private func updateContinuous() {
         settingsStore.settings.continuousMode = continuousCheckbox.state == .on
         onChange()
+    }
+
+    @objc private func updateLaunchAtStartup() {
+        let enabled = launchAtStartupCheckbox.state == .on
+        LaunchAtStartup.setEnabled(enabled)
+        launchAtStartupCheckbox.state = LaunchAtStartup.isEnabled ? .on : .off
     }
 
     @objc private func updateShortcut() {
@@ -1409,9 +1441,22 @@ final class StatusBarController {
         menu.addCallbackItem(title: "Toggle Free Mode", action: toggleFreeMode)
         menu.addItem(.separator())
         menu.addCallbackItem(title: "Preferences...", action: preferences)
+        let startupItem = NSMenuItem(title: "Launch at Startup", action: nil, keyEquivalent: "")
+        startupItem.target = self
+        startupItem.action = #selector(toggleLaunchAtStartup)
+        startupItem.state = LaunchAtStartup.isEnabled ? .on : .off
+        menu.addItem(startupItem)
         menu.addItem(.separator())
         menu.addCallbackItem(title: "Quit \(appName)") { NSApp.terminate(nil) }
         item.menu = menu
+    }
+
+    @objc private func toggleLaunchAtStartup() {
+        let next = !LaunchAtStartup.isEnabled
+        LaunchAtStartup.setEnabled(next)
+        if let menu = item.menu, let startupItem = menu.item(withTitle: "Launch at Startup") {
+            startupItem.state = LaunchAtStartup.isEnabled ? .on : .off
+        }
     }
 
     private func loadTrayIcon() -> NSImage? {
@@ -1446,6 +1491,24 @@ extension NSMenu {
     }
 }
 
+enum LaunchAtStartup {
+    static var isEnabled: Bool {
+        SMAppService.mainApp.status == .enabled
+    }
+
+    static func setEnabled(_ enabled: Bool) {
+        do {
+            if enabled {
+                try SMAppService.mainApp.register()
+            } else {
+                try SMAppService.mainApp.unregister()
+            }
+        } catch {
+            NSLog("Launch at startup toggle failed: \(error.localizedDescription)")
+        }
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate, EventTapDelegate {
     private let settingsStore = SettingsStore()
     private let eventTap = EventTapManager()
@@ -1455,12 +1518,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, EventTapDelegate {
     private var statusBar: StatusBarController?
     private var preferences: PreferencesWindowController?
 
+    private var permissionTimer: Timer?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         requestAccessibilityPermission()
 
         eventTap.delegate = self
-        eventTap.start()
+        startEventTapWhenTrusted()
 
         preferences = PreferencesWindowController(settingsStore: settingsStore) { [weak self] in
             self?.overlay.updateSettings()
@@ -1475,7 +1540,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, EventTapDelegate {
         ToastWindow.shared.show("\(appName) ready")
     }
 
+    private func startEventTapWhenTrusted() {
+        if AXIsProcessTrusted() {
+            eventTap.start()
+        } else {
+            permissionTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] timer in
+                guard let self else { timer.invalidate(); return }
+                if AXIsProcessTrusted() {
+                    timer.invalidate()
+                    self.permissionTimer = nil
+                    self.eventTap.start()
+                }
+            }
+        }
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
+        permissionTimer?.invalidate()
         eventTap.stop()
     }
 

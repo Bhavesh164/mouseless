@@ -890,8 +890,8 @@ final class OverlayView: NSView {
     }
 
     private func precisionGridRect(around localRegion: CGRect, snapshot: OverlaySnapshot) -> CGRect {
-        let width = min(bounds.width - 48, max(120, CGFloat(snapshot.columns) * 24))
-        let height = min(bounds.height - 96, max(90, CGFloat(snapshot.rows) * 18))
+        let width = min(bounds.width - 48, max(100, CGFloat(snapshot.columns) * 20))
+        let height = min(bounds.height - 96, max(75, CGFloat(snapshot.rows) * 15))
         var origin = CGPoint(
             x: localRegion.midX - width / 2,
             y: localRegion.midY - height / 2
@@ -903,8 +903,8 @@ final class OverlayView: NSView {
 
     private func drawPrecisionAnchor(from localRegion: CGRect, to gridRegion: CGRect) {
         NSColor.systemYellow.withAlphaComponent(0.90).setStroke()
-        let outline = NSBezierPath(rect: localRegion)
-        outline.lineWidth = 2
+        let outline = NSBezierPath(rect: localRegion.insetBy(dx: 1, dy: 1))
+        outline.lineWidth = 1
         outline.stroke()
 
         NSColor.black.withAlphaComponent(0.40).setFill()

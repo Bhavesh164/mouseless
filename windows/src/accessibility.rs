@@ -50,11 +50,11 @@ impl UiAutomationDetector {
         )
     }
 
-    fn clickable_center(
+    fn clickable_bounds(
         &self,
         walker: &IUIAutomationTreeWalker,
         element: &IUIAutomationElement,
-    ) -> Option<(f64, f64, f64)> {
+    ) -> Option<(f64, f64, f64, RECT)> {
         let mut current: Option<IUIAutomationElement> = Some(element.clone());
         for _ in 0..8 {
             let el = current?;
@@ -64,7 +64,7 @@ impl UiAutomationDetector {
                         let cx = (rect.left + rect.right) as f64 / 2.0;
                         let cy = (rect.top + rect.bottom) as f64 / 2.0;
                         let area = ((rect.right - rect.left) * (rect.bottom - rect.top)) as f64;
-                        return Some((cx, cy, area.max(1.0)));
+                        return Some((cx, cy, area.max(1.0), rect));
                     }
                 }
             }
@@ -110,7 +110,12 @@ impl ClickDetector for UiAutomationDetector {
         let walker = unsafe { automation.ControlViewWalker() }.ok()?;
 
         let offsets = scan_offsets();
-        let mut candidates: Vec<(f64, f64, f64, i32)> = Vec::new();
+        // A browser often exposes a whole video card as one accessible
+        // control.  Clicking its centre can land on the title even when the
+        // user selected the thumbnail.  Keep the user's point when it is
+        // already inside a clickable control; only use a centre point to snap
+        // to a nearby control.
+        let mut candidates: Vec<(f64, f64, f64, i32, bool)> = Vec::new();
         for (order, (ox, oy)) in offsets.iter().enumerate() {
             let px = (x + *ox) as i32;
             let py = (y + *oy) as i32;
@@ -118,8 +123,12 @@ impl ClickDetector for UiAutomationDetector {
                 Ok(e) => e,
                 Err(_) => continue,
             };
-            if let Some((cx, cy, area)) = self.clickable_center(&walker, &element) {
-                candidates.push((cx, cy, area, order as i32));
+            if let Some((cx, cy, area, rect)) = self.clickable_bounds(&walker, &element) {
+                let contains_requested_point = x >= rect.left as f64
+                    && x <= rect.right as f64
+                    && y >= rect.top as f64
+                    && y <= rect.bottom as f64;
+                candidates.push((cx, cy, area, order as i32, contains_requested_point));
             }
         }
 
@@ -127,11 +136,18 @@ impl ClickDetector for UiAutomationDetector {
             return None;
         }
         candidates.sort_by(|a, b| {
-            a.2.partial_cmp(&b.2)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then(a.3.cmp(&b.3))
+            b.4.cmp(&a.4).then_with(|| {
+                a.2.partial_cmp(&b.2)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then(a.3.cmp(&b.3))
+            })
         });
-        Some((candidates[0].0, candidates[0].1))
+        let candidate = candidates[0];
+        if candidate.4 {
+            Some((x, y))
+        } else {
+            Some((candidate.0, candidate.1))
+        }
     }
 }
 

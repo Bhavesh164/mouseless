@@ -249,7 +249,11 @@ impl OverlayWindows {
         if buf.is_null() {
             return;
         }
-        let dim_alpha = (snapshot.opacity * 0.48 * 255.0) as u8;
+        let dim_alpha = if snapshot.scroll_mode {
+            0
+        } else {
+            (snapshot.opacity * 0.48 * 255.0) as u8
+        };
         let dim_pixel = (dim_alpha as u32) << 24;
         unsafe {
             let slice = std::slice::from_raw_parts_mut(buf, width * height);
@@ -259,7 +263,29 @@ impl OverlayWindows {
         }
 
         let local_region = local_rect(snapshot.active_region, w.monitor);
-        if snapshot.active_region.intersects(&w.monitor) {
+        if snapshot.scroll_mode {
+            if snapshot.active_region.intersects(&w.monitor) {
+                let r = local_region;
+                draw_rect_outline(
+                    buf, w.width, w.height, r.left, r.top, r.right, r.bottom, 0, 178, 178, 240,
+                );
+                if r.width() > 2 && r.height() > 2 {
+                    draw_rect_outline(
+                        buf,
+                        w.width,
+                        w.height,
+                        r.left + 1,
+                        r.top + 1,
+                        r.right - 1,
+                        r.bottom - 1,
+                        0,
+                        178,
+                        178,
+                        240,
+                    );
+                }
+            }
+        } else if snapshot.active_region.intersects(&w.monitor) {
             let region_alpha = (snapshot.opacity * 0.16 * 255.0) as u8;
             let r = local_region;
             fill_rect(

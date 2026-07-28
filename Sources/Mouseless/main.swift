@@ -792,7 +792,8 @@ extension OverlayController: OverlayViewDataSource {
             status: actionStatus,
             continuousMode: settings.continuousMode,
             dragging: mouse.isDragging,
-            precisionMode: isPrecisionMode
+            precisionMode: isPrecisionMode,
+            scrollMode: scrollModifierActive
         )
     }
 }
@@ -809,6 +810,7 @@ struct OverlaySnapshot {
     let continuousMode: Bool
     let dragging: Bool
     let precisionMode: Bool
+    let scrollMode: Bool
 }
 
 protocol OverlayViewDataSource: AnyObject {
@@ -864,6 +866,12 @@ final class OverlayView: NSView {
         let context = NSGraphicsContext.current?.cgContext
         context?.setShouldAntialias(true)
 
+        if snapshot.scrollMode {
+            drawScrollBoundary(snapshot)
+            drawStatus(snapshot)
+            return
+        }
+
         NSColor.black.withAlphaComponent(snapshot.opacity * 0.48).setFill()
         bounds.fill()
 
@@ -887,6 +895,16 @@ final class OverlayView: NSView {
             drawPrecisionCursor(snapshot, in: gridRegion)
         }
         drawStatus(snapshot)
+    }
+
+    private func drawScrollBoundary(_ snapshot: OverlaySnapshot) {
+        guard snapshot.screenFrame.intersects(snapshot.activeRegion) else { return }
+        let localRegion = localRect(for: snapshot.activeRegion)
+        NSColor.systemTeal.withAlphaComponent(0.95).setStroke()
+        let border = NSBezierPath(rect: localRegion.insetBy(dx: 1, dy: 1))
+        border.lineWidth = 2
+        border.stroke()
+        drawCursor(snapshot)
     }
 
     private func precisionGridRect(around localRegion: CGRect, snapshot: OverlaySnapshot) -> CGRect {

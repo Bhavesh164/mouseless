@@ -63,6 +63,7 @@ pub struct Snapshot {
     pub continuous_mode: bool,
     pub dragging: bool,
     pub precision_mode: bool,
+    pub scroll_mode: bool,
 }
 
 impl OverlayState {
@@ -436,6 +437,7 @@ impl OverlayState {
             continuous_mode: s.continuous_mode,
             dragging: self.mouse.is_dragging(),
             precision_mode: self.precision_mode(),
+            scroll_mode: self.scroll_modifier_active,
         }
     }
 }

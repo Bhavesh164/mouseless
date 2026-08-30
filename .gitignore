@@ -10,6 +10,11 @@ xcuserdata/
 *.tar.bz2
 *.tbz
 
-# Windows / Rust build artifacts
+# Build artifacts
 windows/target/
+linux/target/
+target/
 dist/
+__pycache__/
+*.pyc
+*.sock

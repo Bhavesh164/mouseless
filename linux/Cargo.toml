@@ -1,0 +1,29 @@
+[package]
+name = "mouseless"
+version = "0.1.1"
+edition = "2021"
+description = "Mouseless keyboard mouse controller - Linux (Wayland) port"
+default-run = "mouseless"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+wayland-scanner = "0.31"
+evdev = "0.12"
+fontdue = "0.9"
+libc = "0.2"
+zbus = "5"
+wayland-backend = "0.3"
+atspi = { version = "0.26", default-features = false, features = ["async-std"] }
+async-std = "1"
+
+[[bin]]
+name = "mouseless"
+path = "src/main.rs"
+
+[profile.release]
+lto = true
+strip = true

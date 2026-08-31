@@ -180,6 +180,10 @@ impl OverlayState {
     /// Handle a keyboard event while the overlay is visible.
     /// Returns `true` when the overlay should be hidden afterwards.
     pub fn handle_key(&mut self, label: &str, is_key_down: bool) -> bool {
+        self.handle_key_with_modifiers(label, is_key_down, false)
+    }
+
+    pub fn handle_key_with_modifiers(&mut self, label: &str, is_key_down: bool, shift_held: bool) -> bool {
         self.request_hide = false;
 
         if !is_key_down {
@@ -232,14 +236,32 @@ impl OverlayState {
             }
             "ArrowRight" => {
                 if self.precision_mode() {
-                    self.nudge(self.precision_nudge_step(), 0.0);
+                    if shift_held {
+                        self.move_screen(1);
+                    } else {
+                        let (cx, _) = self.virtual_cursor();
+                        if (cx - self.active_region.right).abs() < 0.5 {
+                            self.move_screen(1);
+                        } else {
+                            self.nudge(self.precision_nudge_step(), 0.0);
+                        }
+                    }
                 } else {
                     self.move_screen(1);
                 }
             }
             "ArrowLeft" => {
                 if self.precision_mode() {
-                    self.nudge(-self.precision_nudge_step(), 0.0);
+                    if shift_held {
+                        self.move_screen(-1);
+                    } else {
+                        let (cx, _) = self.virtual_cursor();
+                        if (cx - self.active_region.left).abs() < 0.5 {
+                            self.move_screen(-1);
+                        } else {
+                            self.nudge(-self.precision_nudge_step(), 0.0);
+                        }
+                    }
                 } else {
                     self.move_screen(-1);
                 }

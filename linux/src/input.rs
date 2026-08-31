@@ -243,13 +243,11 @@ pub fn set_keyboard_grab(grab: bool) {
     if ok > 0 {
         *active = grab;
         eprintln!(
-            "mouseless: keyboard {} on {}/{} devices",
-            if grab { "grabbed (exclusive)" } else { "released" },
-            ok,
-            fds.len()
+            "mouseless: keyboard {}",
+            if grab { "grabbed (exclusive)" } else { "released" }
         );
     } else if failed > 0 {
-        eprintln!("mouseless: keyboard grab failed on all {} devices", fds.len());
+        eprintln!("mouseless: keyboard grab failed");
     }
 }
 
@@ -350,7 +348,7 @@ pub fn run_input(ctx: InputContext) -> Result<(), String> {
         }
         let active = GRAB_ACTIVE.get_or_init(|| Mutex::new(false));
         *active.lock().unwrap() = false;
-        eprintln!("mouseless: monitoring {} keyboard devices, fds {:?}", devices.len(), *fds);
+        eprintln!("mouseless: monitoring keyboard, fds {:?}", *fds);
     }
 
     let shared = Arc::new(Mutex::new(InputShared::default()));
@@ -524,10 +522,11 @@ fn handle_event(ctx: &InputContext, shared: &Mutex<InputShared>, code: u16, valu
     }
 
     {
+        let shift_held = guard.modifiers.shift;
         let mut state = ctx.state.lock().unwrap();
         if state.is_visible() {
             let was_visible = state.is_visible();
-            let hide = state.handle_key(label, is_down);
+            let hide = state.handle_key_with_modifiers(label, is_down, shift_held);
             let pending = state.take_pending_scroll();
             let should_repeat = is_down && state.is_repeatable_key(label);
             let now_visible = state.is_visible();

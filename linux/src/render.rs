@@ -507,14 +507,17 @@ fn draw_precision(
     region: RectI,
     scale: i32,
 ) {
-    // Match macOS precision grid sizing for accuracy: 20px per column, 15px per row
-    // (scaled), with the same min/max as OverlayView.precisionGridRect.
+    // Slightly larger magnified grid for third-level readability — inspired by
+    // mouseless.click "Zoom on subgrid" (#53). Keeps all labels (characters)
+    // but makes each magnified cell ~24×18px (vs 20×15) so the third-grid
+    // targets like Chromium's back button are easier to distinguish.
+    // Still clamped to screen size, with the same positioning logic as macOS.
     let box_w = ((width as f64 - 48.0 * scale as f64)
-        .min((snapshot.columns as f64) * 20.0 * scale as f64)
-        .max(100.0 * scale as f64)) as i32;
+        .min((snapshot.columns as f64) * 24.0 * scale as f64)
+        .max(120.0 * scale as f64)) as i32;
     let box_h = ((height as f64 - 96.0 * scale as f64)
-        .min((snapshot.rows as f64) * 15.0 * scale as f64)
-        .max(75.0 * scale as f64)) as i32;
+        .min((snapshot.rows as f64) * 18.0 * scale as f64)
+        .max(90.0 * scale as f64)) as i32;
     let mut bx = region.left + region.width() / 2 - box_w / 2;
     let mut by = region.top + region.height() / 2 - box_h / 2;
     bx = bx.clamp(24 * scale, width - box_w - 24 * scale);

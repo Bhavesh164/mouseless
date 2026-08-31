@@ -10,8 +10,8 @@ const ROOT_PATH: &str = "/org/a11y/atspi/accessible/root";
 const MAX_NODES: usize = 2500;
 const MAX_DEPTH: u32 = 12;
 const BUDGET: Duration = Duration::from_millis(150);
-const NEAR_PAD: f64 = 10.0;
-const CLOSE_RADIUS: f64 = 16.0;
+const NEAR_PAD: f64 = 18.0;
+const CLOSE_RADIUS: f64 = 24.0;
 
 const CLICKABLE_ROLES: &[&str] = &[
     "push button",

@@ -174,7 +174,13 @@ impl OverlayState {
     fn precision_nudge_step(&self) -> f64 {
         let w = self.active_region.width();
         let h = self.active_region.height();
-        (1.0f64).max((w.min(h) / 32.0).min(4.0))
+        // Finer nudge for small targets (e.g. Chromium back button) — inspired by
+        // mouseless.click's "Nudges per cell" (4 nudges per cell) and warpd's
+        // sub-pixel motion. Old max(1.0, min/32) gave 1px floor which is coarse
+        // when third-grid cell is ~10×6px (error up to 5px). New floor 0.35px
+        // with /48 gives ~0.6px for 30px cells and 0.35px for 8px cells, so a
+        // 2-3 arrow taps can correct the half-cell error without extra grid keys.
+        (0.35f64).max((w.min(h) / 48.0).min(3.0))
     }
 
     /// Handle a keyboard event while the overlay is visible.
@@ -381,6 +387,10 @@ impl OverlayState {
         }
 
         if self.precision_mode() {
+            // Third-grid direct click: whatever alphabet is pressed in precision
+            // (third level) should click in that subcell region. No offset
+            // shenanigans — just move to the cell center and click (guarded
+            // via AT-SPI snap). Keeps magnified box labels visible.
             let sub_w = self.active_region.width() / s.grid_columns as f64;
             let sub_h = self.active_region.height() / s.grid_rows as f64;
             let target_x = self.active_region.left + (column as f64 + 0.5) * sub_w;
@@ -390,12 +400,15 @@ impl OverlayState {
                 target_y - self.active_region.mid_y(),
             );
             let (vx, vy) = self.virtual_cursor();
-            self.mouse.move_drag(vx, vy);
-            self.action_status = format!(
-                "Precision {}  arrows nudge {}px",
-                self.label_for_current_path(),
-                self.precision_nudge_step() as i32
-            );
+            if self.mouse.is_dragging() {
+                self.mouse.move_drag(vx, vy);
+            } else {
+                self.mouse.move_to(vx, vy);
+            }
+            // Click directly in this third-grid cell (guarded snap). This
+            // removes the need for a separate Enter press and makes the third
+            // level feel precise — exactly what the user requested.
+            self.perform("Left click", LastAction::LeftClick);
             return;
         }
 
@@ -410,12 +423,17 @@ impl OverlayState {
         );
         self.target_offset = (0.0, 0.0);
         let (vx, vy) = self.virtual_cursor();
-        self.mouse.move_drag(vx, vy);
+        if self.mouse.is_dragging() {
+            self.mouse.move_drag(vx, vy);
+        } else {
+            self.mouse.move_to(vx, vy);
+        }
         self.action_status = if self.precision_mode() {
+            let step = self.precision_nudge_step();
             format!(
-                "Precision {}  arrows nudge {}px",
+                "Precision {}  arrows nudge {:.1}px",
                 self.label_for_current_path(),
-                self.precision_nudge_step() as i32
+                step
             )
         } else {
             format!("Target {}", self.label_for_current_path())
@@ -440,10 +458,13 @@ impl OverlayState {
         );
         if self.mouse.is_dragging() {
             self.mouse.move_drag(next_x, next_y);
+        } else {
+            self.mouse.move_to(next_x, next_y);
         }
+        let step = self.precision_nudge_step();
         self.action_status = format!(
-            "Nudged {}px  Enter click  Space+J/K scroll",
-            self.precision_nudge_step() as i32
+            "Nudged {:.1}px  Enter click  Space+J/K scroll",
+            step
         );
     }
 
@@ -566,15 +587,23 @@ mod tests {
         assert_eq!(reg2, Rect::new(76.8, 0.0, 153.6, 43.2));
         assert!(state.snapshot().precision_mode);
 
-        // Step 3: Select "A" -> cell size 76.8/5 = 15.36 < 24.0 -> enters precision mode
+        // Step 3: Select "A" -> precision cell (15.36 <24) — now directly clicks
+        // in that third-grid subcell (no offset shenanigans). The grid key
+        // itself performs the left click and hides the overlay.
+        let hide = state.handle_key("A", true);
+        assert!(hide);
+        assert!(!state.is_visible());
+        // After hide, showing again should reset to full region; undo
+        // still works for the first two levels when re-shown.
+        state.show();
         let hide = state.handle_key("A", true);
         assert!(!hide);
-        assert!(state.is_visible());
+        let hide = state.handle_key("S", true);
+        assert!(!hide);
         assert!(state.snapshot().precision_mode);
-
-        // Step 4: Undo steps back
+        // Backspace should return to first level
         state.handle_key("Backspace", true);
-        assert_eq!(state.snapshot().active_region, reg1);
+        assert_eq!(state.snapshot().active_region, Rect::new(0.0, 0.0, 384.0, 216.0));
         assert!(!state.snapshot().precision_mode);
 
         state.handle_key("Backspace", true);

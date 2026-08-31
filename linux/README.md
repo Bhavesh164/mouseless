@@ -73,13 +73,71 @@ cp target/release/mouseless ~/.local/bin/
 sudo cp target/release/mouseless /usr/local/bin/
 ```
 
-### Autostart with Hyprland
+### Autostart with Hyprland (runs in background, no terminal needed)
 
-Add the following line to your `hyprland.conf`:
+`exec-once` already runs the daemon detached — you do **not** need `&`, `nohup`, or a terminal.
 
-```ini
-exec-once = mouseless
+1. Install the binary so Hyprland can find it (you already use `/usr/local/bin/mouseless`):
+   ```sh
+   cd linux
+   cargo build --release
+   sudo cp target/release/mouseless /usr/local/bin/mouseless
+   # verify
+   /usr/local/bin/mouseless --help
+   ```
+
+2. Add to `~/.config/hypr/hyprland.conf` (or `~/.config/hypr/hyprland.conf` via Omarchy):
+   ```ini
+   exec-once = /usr/local/bin/mouseless
+   # or if /usr/local/bin is in $PATH:
+   exec-once = mouseless
+   ```
+
+   Reload Hyprland (`Super+Shift+R` or `hyprctl reload`) or log out/in. The daemon starts automatically on login and stays in background.
+
+3. Manual background start (without Hyprland, or for testing):
+   ```sh
+   # preferred — uses the IPC socket, no terminal spam
+   nohup /usr/local/bin/mouseless > /tmp/mouseless.log 2>&1 &
+   disown
+   # check
+   mouseless status
+   cat /tmp/mouseless.log
+   ```
+
+### Managing the Daemon — Stop, Restart, Logs
+
+All of these work whether installed to `~/.local/bin` or `/usr/local/bin`:
+
+```sh
+# status
+mouseless status
+pgrep -a mouseless
+ls -l /run/user/$UID/mouseless-*.sock
+
+# stop (graceful — preferred)
+mouseless quit
+# or
+pkill mouseless
+# force
+killall mouseless
+
+# if you see "another mouseless daemon is already running"
+mouseless quit; sleep 0.5; pkill mouseless; sleep 0.5
+rm -f /run/user/$UID/mouseless-*.sock
+nohup /usr/local/bin/mouseless > /tmp/mouseless.log 2>&1 &
+
+# restart after updating the binary
+sudo cp linux/target/release/mouseless /usr/local/bin/mouseless
+mouseless quit; sleep 0.5
+nohup /usr/local/bin/mouseless > /tmp/mouseless.log 2>&1 &
+
+# logs (Hyprland exec-once logs go to Hyprland log; manual logs to /tmp)
+cat /tmp/mouseless.log
+hyprctl rollinglog | grep -i mouseless
 ```
+
+Tip: `exec-once = mouseless` in Hyprland needs no `&`. If you run manually in a terminal, **always** redirect (`> /tmp/mouseless.log 2>&1 &`) otherwise `keyboard grabbed/released` messages will spam the terminal — that's what you saw when running `./target/release/mouseless &` without redirection.
 
 ## Keys
 

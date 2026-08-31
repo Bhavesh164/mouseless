@@ -75,7 +75,7 @@ sudo cp target/release/mouseless /usr/local/bin/
 
 ### Autostart with Hyprland (runs in background, no terminal needed)
 
-`exec-once` already runs the daemon detached — you do **not** need `&`, `nohup`, or a terminal.
+`exec-once` / `o.launch_on_start` already runs the daemon detached — you do **not** need `&`, `nohup`, or a terminal.
 
 1. Install the binary so Hyprland can find it (you already use `/usr/local/bin/mouseless`):
    ```sh
@@ -86,14 +86,24 @@ sudo cp target/release/mouseless /usr/local/bin/
    /usr/local/bin/mouseless --help
    ```
 
-2. Add to `~/.config/hypr/hyprland.conf` (or `~/.config/hypr/hyprland.conf` via Omarchy):
+2. Autostart — pick your setup:
+
+   **Standard Hyprland** (`~/.config/hypr/hyprland.conf` is your main config):
    ```ini
    exec-once = /usr/local/bin/mouseless
    # or if /usr/local/bin is in $PATH:
    exec-once = mouseless
    ```
+   Then reload (`Super+Shift+R` or `hyprctl reload`) or log out/in. The daemon starts automatically on login and stays in background.
 
-   Reload Hyprland (`Super+Shift+R` or `hyprctl reload`) or log out/in. The daemon starts automatically on login and stays in background.
+   **Omarchy** (uses `~/.config/hypr/hyprland.lua:1` + `~/.config/hypr/autostart.lua:1` — `~/.config/hypr/hyprland.conf:1` is **ignored**):
+   ```lua
+   -- edit ~/.config/hypr/autostart.lua
+   o.launch_on_start("mouseless")
+   -- or with absolute path:
+   -- o.launch_on_start("/usr/local/bin/mouseless")
+   ```
+   This is the Omarchy wrapper for `hl.on("hyprland.start", ...)` + `uwsm-app --` (see `~/.config/hypr/hyprland.lua:18` → `require("hypr.autostart")` and `/usr/share/omarchy/default/hypr/helpers.lua:118`). You **must log out/in** — `o.launch_on_start` only runs on `hyprland.start`, `hyprctl reload` is not enough. For an immediate test without relogin: `uwsm-app -- mouseless &` then `mouseless status` should show `overlay=hidden ...` instead of `daemon is not running`.
 
 3. Manual background start (without Hyprland, or for testing):
    ```sh

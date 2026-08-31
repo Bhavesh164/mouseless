@@ -1,6 +1,6 @@
 use crate::core::OverlayState;
 use crate::free_mode::FreeModeController;
-use crate::settings::Settings;
+use crate::settings::{Hotkey, Settings};
 use crate::ControlMsg;
 use std::collections::HashMap;
 use std::fs;
@@ -273,7 +273,6 @@ const REPEAT_DELAY: Duration = Duration::from_millis(450);
 const REPEAT_INTERVAL: Duration = Duration::from_millis(55);
 
 /// Shared per-event state across all keyboard device threads.
-#[derive(Default)]
 struct InputShared {
     modifiers: Modifiers,
     repeats: HashMap<u16, RepeatEntry>,
@@ -283,6 +282,68 @@ struct InputShared {
     last_events: HashMap<(u16, i32), Instant>,
     /// Last time the overlay was toggled via hotkey, for debouncing.
     last_toggle: Option<Instant>,
+    /// Pending grab: overlay was just shown via hotkey but we delay the
+    /// EVIOCGRAB until the hotkey's modifiers and key are fully released.
+    /// This avoids the compositor seeing Alt-down + U-down but missing the
+    /// releases (because EVIOCGRAB blocks it), which would leave Alt stuck
+    /// and cause Alt+click downloads and broken Alt+Space rofi binding.
+    pending_grab: bool,
+    pending_hotkey: Option<Hotkey>,
+    pending_key_code: Option<u16>,
+    pending_key_down: bool,
+    pending_start: Option<Instant>,
+}
+
+impl Default for InputShared {
+    fn default() -> Self {
+        InputShared {
+            modifiers: Modifiers::default(),
+            repeats: HashMap::new(),
+            last_events: HashMap::new(),
+            last_toggle: None,
+            pending_grab: false,
+            pending_hotkey: None,
+            pending_key_code: None,
+            pending_key_down: false,
+            pending_start: None,
+        }
+    }
+}
+
+impl InputShared {
+    fn pending_should_clear(&self, now: Instant) -> bool {
+        if !self.pending_grab {
+            return false;
+        }
+        // Timeout: don't wait forever if user holds Alt.
+        if let Some(start) = self.pending_start {
+            if now.duration_since(start) > Duration::from_millis(500) {
+                return true;
+            }
+        }
+        if self.pending_key_down {
+            return false;
+        }
+        if let Some(hk) = &self.pending_hotkey {
+            // Still holding the exact hotkey modifier combination -> wait.
+            if hk.control == self.modifiers.control
+                && hk.alt == self.modifiers.alt
+                && hk.shift == self.modifiers.shift
+                && hk.win == self.modifiers.win
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn clear_pending(&mut self) {
+        self.pending_grab = false;
+        self.pending_hotkey = None;
+        self.pending_key_code = None;
+        self.pending_key_down = false;
+        self.pending_start = None;
+    }
 }
 
 /// Window for collapsing twin-device duplicate events. Duplicates arrive
@@ -355,6 +416,8 @@ pub fn run_input(ctx: InputContext) -> Result<(), String> {
 
     // Auto-repeat ticker: the compositor does not generate repeats while our
     // layer surface holds exclusive keyboard focus, so the input side does it.
+    // Also handles pending_grab timeout: if user holds Alt after Alt+U, we force
+    // the grab after 500ms to avoid indefinite un-grabbed overlay.
     {
         let ctx = ctx.clone();
         let shared = shared.clone();
@@ -363,6 +426,14 @@ pub fn run_input(ctx: InputContext) -> Result<(), String> {
             .spawn(move || loop {
                 std::thread::sleep(Duration::from_millis(10));
                 let now = Instant::now();
+                {
+                    let mut guard = shared.lock().unwrap();
+                    if guard.pending_grab && guard.pending_should_clear(now) {
+                        guard.clear_pending();
+                        drop(guard);
+                        update_grab(&ctx);
+                    }
+                }
                 let due: Vec<(u16, &'static str)> = {
                     let mut guard = shared.lock().unwrap();
                     let mut due = Vec::new();
@@ -441,7 +512,33 @@ fn handle_event(ctx: &InputContext, shared: &Mutex<InputShared>, code: u16, valu
     if is_duplicate_event(&mut guard, code, value, now) {
         return;
     }
+    // Check pending timeout before handling event
+    if guard.pending_grab && guard.pending_should_clear(now) {
+        guard.clear_pending();
+        drop(guard);
+        update_grab(ctx);
+        guard = shared.lock().unwrap();
+    }
     if update_modifiers(&mut guard.modifiers, code, is_down) {
+        // If this modifier release completes the pending hotkey release, grab now.
+        if !is_down && guard.pending_should_clear(now) {
+            guard.clear_pending();
+            drop(guard);
+            update_grab(ctx);
+        }
+        return;
+    }
+
+    // Handle pending hotkey key release
+    if !is_down && guard.pending_grab && Some(code) == guard.pending_key_code {
+        guard.pending_key_down = false;
+        if guard.pending_should_clear(now) {
+            guard.clear_pending();
+            drop(guard);
+            update_grab(ctx);
+            return;
+        }
+        // Still pending, consume this release and don't treat as overlay key
         return;
     }
 
@@ -452,6 +549,7 @@ fn handle_event(ctx: &InputContext, shared: &Mutex<InputShared>, code: u16, valu
             (m.control, m.alt, m.shift, m.win)
         };
         let is_hotkey = s.overlay_hotkey.matches(label, ctrl, alt, shift, win);
+        let hotkey_clone = s.overlay_hotkey.clone();
         drop(s);
 
         if is_hotkey {
@@ -463,19 +561,50 @@ fn handle_event(ctx: &InputContext, shared: &Mutex<InputShared>, code: u16, valu
                 guard.last_toggle = Some(now);
                 let mut state = ctx.state.lock().unwrap();
                 if state.is_visible() {
+                    // Hide: clear pending immediately and ungrab
+                    guard.clear_pending();
                     state.hide();
                     drop(state);
                     let _ = ctx.tx.send(ControlMsg::HideOverlay);
+                    drop(guard);
+                    update_grab(ctx);
                 } else {
                     state.show();
                     drop(state);
                     let _ = ctx.tx.send(ControlMsg::ToggleOverlay);
+                    // Setup delayed grab to avoid compositor Alt-stuck
+                    guard.pending_grab = true;
+                    guard.pending_hotkey = Some(hotkey_clone);
+                    guard.pending_key_code = Some(code);
+                    guard.pending_key_down = true;
+                    guard.pending_start = Some(now);
+                    drop(guard);
+                    // Don't grab yet; will grab after modifiers and key released
                 }
-                drop(guard);
-                update_grab(ctx);
                 return;
             }
             guard.repeats.remove(&code);
+            return;
+        }
+    } else if guard.pending_grab && guard.pending_should_clear(now) {
+        guard.clear_pending();
+        drop(guard);
+        update_grab(ctx);
+        guard = shared.lock().unwrap();
+    }
+
+    // If still pending, defer overlay/free_mode handling until pending clears
+    // to avoid processing grid keys while compositor still sees Alt held
+    // (which would cause Alt+click to download).
+    if guard.pending_grab {
+        if guard.pending_should_clear(now) {
+            guard.clear_pending();
+            drop(guard);
+            update_grab(ctx);
+            guard = shared.lock().unwrap();
+        } else {
+            // Still pending: consume event without overlay handling
+            // Let the compositor see it (since not yet grabbed) but don't refine grid
             return;
         }
     }
@@ -535,6 +664,7 @@ fn handle_event(ctx: &InputContext, shared: &Mutex<InputShared>, code: u16, valu
                 let _ = ctx.tx.send(ControlMsg::ScrollAt { x, y, vertical: v, horizontal: h });
             }
             if hide {
+                guard.clear_pending();
                 guard.last_toggle = Some(now);
                 let _ = ctx.tx.send(ControlMsg::HideOverlay);
             } else if is_down || label == "Space" {
@@ -765,5 +895,104 @@ mod tests {
         let cell_s_region = state.lock().unwrap().snapshot().active_region;
         assert_ne!(cell_a_region, cell_s_region);
         assert!(state.lock().unwrap().is_visible());
+    }
+
+    #[test]
+    fn overlay_show_delays_grab_until_alt_released() {
+        let settings = Arc::new(Mutex::new(Settings::default()));
+        let state = Arc::new(Mutex::new(OverlayState::new(
+            settings.clone(),
+            Arc::new(TestMouse),
+            Arc::new(TestDetector),
+            Arc::new(TestEnvironment),
+        )));
+        let (tx, rx) = channel();
+        let ctx = InputContext {
+            settings,
+            state: state.clone(),
+            free_mode: Arc::new(Mutex::new(FreeModeController::new(
+                Arc::new(TestMouse),
+                Arc::new(TestEnvironment),
+                Arc::new(|_| {}),
+            ))),
+            tx,
+        };
+        let shared = Mutex::new(InputShared::default());
+
+        // Press Alt, then U to open overlay
+        handle_event(&ctx, &shared, KEY_LEFTALT, 1);
+        handle_event(&ctx, &shared, 22, 1); // U down
+        assert!(matches!(rx.try_recv(), Ok(ControlMsg::ToggleOverlay)));
+        // Overlay visible but grab pending (Alt still held)
+        assert!(state.lock().unwrap().is_visible());
+        assert!(shared.lock().unwrap().pending_grab);
+        // Pressing A while Alt still held should be ignored (pending)
+        handle_event(&ctx, &shared, 30, 1); // A down while Alt held
+        // Should not refine yet, no RenderOverlay
+        assert!(rx.try_recv().is_err());
+        let region_before = state.lock().unwrap().snapshot().active_region;
+
+        // Release U but keep Alt -> still pending
+        handle_event(&ctx, &shared, 22, 0); // U up
+        assert!(shared.lock().unwrap().pending_grab);
+        // Use different key S to avoid dedupe window (50ms) with previous A
+        handle_event(&ctx, &shared, 31, 1); // S down while still pending
+        assert!(rx.try_recv().is_err());
+        assert_eq!(state.lock().unwrap().snapshot().active_region, region_before);
+
+        // Release Alt -> pending clears, next key should work
+        handle_event(&ctx, &shared, KEY_LEFTALT, 0); // Alt up
+        assert!(!shared.lock().unwrap().pending_grab);
+        // Wait for dedupe window to clear (or use fresh key D)
+        std::thread::sleep(Duration::from_millis(60));
+        handle_event(&ctx, &shared, 30, 1); // A down now
+        assert!(matches!(rx.try_recv(), Ok(ControlMsg::RenderOverlay)));
+        assert_ne!(state.lock().unwrap().snapshot().active_region, region_before);
+    }
+
+    #[test]
+    fn closing_grid_clears_pending_and_allows_next_open() {
+        let settings = Arc::new(Mutex::new(Settings::default()));
+        let state = Arc::new(Mutex::new(OverlayState::new(
+            settings.clone(),
+            Arc::new(TestMouse),
+            Arc::new(TestDetector),
+            Arc::new(TestEnvironment),
+        )));
+        let (tx, rx) = channel();
+        let ctx = InputContext {
+            settings,
+            state: state.clone(),
+            free_mode: Arc::new(Mutex::new(FreeModeController::new(
+                Arc::new(TestMouse),
+                Arc::new(TestEnvironment),
+                Arc::new(|_| {}),
+            ))),
+            tx,
+        };
+        let shared = Mutex::new(InputShared::default());
+
+        // Open
+        handle_event(&ctx, &shared, KEY_LEFTALT, 1);
+        handle_event(&ctx, &shared, 22, 1);
+        assert!(matches!(rx.try_recv(), Ok(ControlMsg::ToggleOverlay)));
+        handle_event(&ctx, &shared, 22, 0);
+        handle_event(&ctx, &shared, KEY_LEFTALT, 0);
+        assert!(!shared.lock().unwrap().pending_grab);
+        assert!(state.lock().unwrap().is_visible());
+
+        // Close via Q (grid quit key)
+        handle_event(&ctx, &shared, 16, 1); // Q
+        assert!(matches!(rx.try_recv(), Ok(ControlMsg::HideOverlay)));
+        assert!(!state.lock().unwrap().is_visible());
+        assert!(!shared.lock().unwrap().pending_grab);
+
+        // Wait for toggle debounce (250ms) before re-open
+        std::thread::sleep(Duration::from_millis(300));
+        // Re-open should work again with pending
+        handle_event(&ctx, &shared, KEY_LEFTALT, 1);
+        handle_event(&ctx, &shared, 22, 1);
+        assert!(matches!(rx.try_recv(), Ok(ControlMsg::ToggleOverlay)));
+        assert!(shared.lock().unwrap().pending_grab);
     }
 }

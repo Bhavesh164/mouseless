@@ -14,12 +14,47 @@ A Wayland compositor supporting:
 Supported compositors: **Hyprland**, **Sway**, **River**, and other wlroots-based compositors.
 
 ### 2. User Input Permissions
-Mouseless reads raw keyboard events via `/dev/input/event*` for global hotkey and overlay interception. Your user must belong to the `input` group:
+Mouseless reads raw keyboard events via `/dev/input/event*` for global hotkey and overlay interception (`linux/src/input.rs:148` `open_keyboards()`). Your user must belong to the `input` group:
 
 ```sh
 sudo usermod -aG input $USER
 ```
-*(Note: Log out and log back in for group membership to take effect).*
+*(Note: Log out and log back in for group membership to take effect — `groups` must show `input` after relogin).*
+
+#### Why does my keyboard work but mouseless says "No keyboard devices found"?
+
+Your keyboard works in Hyprland because the compositor (`Hyprland`/`wlroots` + `libinput`) opens `/dev/input/event*` as `root` via `systemd-logind` on `seat0` (`loginctl show-session $(loginctl | grep $USER | awk '{print $1}')`). Mouseless cannot use that path — it opens the same nodes directly via `evdev` (`evdev::Device::open`) to `EVIOCGRAB` the keyboard while the grid is visible (`linux/src/input.rs:177` `set_keyboard_grab`). Those nodes are `crw-rw---- root input` (`0660`):
+
+```sh
+ls -l /dev/input/event*   # crw-rw---- 1 root input 13, 64 ...
+getfacl /dev/input/event6 # no user:bv:rw- unless uaccess, only group::rw-
+groups                    # must contain input; fresh Arch/Omarchy creates group input:GID 992 empty
+id; getent group input    # verify
+```
+
+Only `root` or members of `input` can `open()` them. Wayland's `uaccess` tag (`70-uaccess.rules`) is **not** applied to keyboards (only `ID_INPUT_JOYSTICK` etc.), so `logind` does not add a per-user ACL for them — `udevadm info /dev/input/event6 | grep TAGS` shows only `power-switch`, not `uaccess`. That's why `hyprctl devices` lists keyboards but `mouseless` (`linux/src/input.rs:390`) returns `No keyboard devices found`.
+
+Quick check without relogin:
+
+```sh
+# fails as non-input user:
+python3 -c "import os; os.open('/dev/input/event6', os.O_RDONLY)"
+# Permission denied -> you need input group
+
+# after sudo usermod -aG input $USER, verify effective group:
+groups                 # after logout/login should include input
+# or temporary test without logout:
+newgrp input
+mouseless status
+```
+
+#### It worked before — why does it need `usermod` now?
+
+* Fresh Arch/Omarchy install (`/var/log/pacman.log` `Creating group 'input' with GID 992` on 2026-08-29) creates an empty `input` group — previous membership is lost.
+* Running `sudo mouseless`/`sudo ./mouseless` works as `root` and hides the permission error (check `history | grep mouseless`).
+* The Hyprland autostart (`~/.config/hypr/autostart.lua` `o.launch_on_start("mouseless")` or `exec-once = mouseless`) now runs unprivileged via `systemd-run --user`, so it needs the group.
+
+> Security: `input` grants raw keylogging capability — intended for this use. Alternative is a `udev` rule with `TAG+="uaccess"` for `ID_INPUT_KEYBOARD`, but `input` group is the upstream-recommended way.
 
 ### 3. Build Dependencies & Packages
 

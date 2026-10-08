@@ -73,14 +73,32 @@ Overlay grid controls:
 
 Free mode controls:
 
-Free mode is started from the status-bar menu and does not have a global keyboard shortcut.
+Toggle it by pressing the free-mode shortcut, **Option+T** by default, or from the
+status-bar menu. Toggle off the same way, or press `q`. While free mode is active
+an orange **FREE MODE** badge stays on screen and the status-bar menu shows a
+checkmark next to `Free Mode`.
 
-- `H/J/K/L` or arrow keys: move the system cursor.
-- `Space`: left click.
-- `R`: right click.
-- `U/D`: scroll up/down.
-- `Y/O`: scroll left/right.
-- `Escape`: exit free mode.
+Free mode reads letters in their **lowercase** form only. Shifted presses and
+Caps Lock do nothing, so always press the plain lowercase key.
+
+Movement is **WASD**, the same as in a game.
+
+| Key | Action |
+|---|---|
+| `w` / `↑` | move up |
+| `a` / `←` | move left |
+| `s` / `↓` | move down |
+| `d` / `→` | move right |
+| `Space` | left click |
+| `r` | right click |
+| `,` | scroll up |
+| `.` | scroll down |
+| `/` | scroll left |
+| `m` | scroll right |
+| `q` / `Esc` | exit free mode |
+
+Both shortcuts are reconfigurable in Preferences. The cursor is kept inside the
+display bounds, so it cannot be driven off-screen.
 
 ## Preferences
 

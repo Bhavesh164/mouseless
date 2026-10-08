@@ -15,6 +15,26 @@ struct Settings: Codable {
     var scrollStep: Int32 = 18
     var overlayHotkey: Hotkey = .defaultOverlay
     var quitGridKey: String = "Q"
+    /// Toggles free mode. Defaults to Option+T.
+    var freeModeHotkey: Hotkey = .defaultFreeMode
+
+    init() {}
+
+    /// Written out rather than synthesized: a synthesized `init(from:)` throws on
+    /// any key missing from the stored JSON, so simply adding a property above
+    /// would make every config written before it existed fail to load.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        gridRows = try c.decodeIfPresent(Int.self, forKey: .gridRows) ?? 5
+        gridColumns = try c.decodeIfPresent(Int.self, forKey: .gridColumns) ?? 5
+        overlayOpacity = try c.decodeIfPresent(Double.self, forKey: .overlayOpacity) ?? 0.72
+        continuousMode = try c.decodeIfPresent(Bool.self, forKey: .continuousMode) ?? false
+        freeModeStep = try c.decodeIfPresent(Double.self, forKey: .freeModeStep) ?? 26
+        scrollStep = try c.decodeIfPresent(Int32.self, forKey: .scrollStep) ?? 18
+        overlayHotkey = try c.decodeIfPresent(Hotkey.self, forKey: .overlayHotkey) ?? .defaultOverlay
+        quitGridKey = try c.decodeIfPresent(String.self, forKey: .quitGridKey) ?? "Q"
+        freeModeHotkey = try c.decodeIfPresent(Hotkey.self, forKey: .freeModeHotkey) ?? .defaultFreeMode
+    }
 
     func clamped() -> Settings {
         var copy = self
@@ -39,6 +59,7 @@ struct Hotkey: Codable {
     var shift: Bool
 
     static let defaultOverlay = Hotkey(key: "U", command: false, option: true, control: false, shift: false)
+    static let defaultFreeMode = Hotkey(key: "T", command: false, option: true, control: false, shift: false)
 
     var displayName: String {
         var parts: [String] = []
@@ -241,30 +262,45 @@ final class MouseController {
     private var dragButton: CGMouseButton = .left
 
     func move(to appKitPoint: CGPoint) {
-        let point = CoordinateSpace.appKitToQuartz(appKitPoint)
-        CGWarpMouseCursorPosition(point)
-        postMouse(type: .mouseMoved, at: appKitPoint, button: .left)
+        let point = CoordinateSpace.clampToScreens(appKitPoint)
+        let quartz = CoordinateSpace.appKitToQuartz(point)
+        CGWarpMouseCursorPosition(quartz)
+        postMouse(type: .mouseMoved, at: point, button: .left)
     }
 
     func click(at appKitPoint: CGPoint, button: CGMouseButton = .left, count: Int64 = 1) {
-        move(to: appKitPoint)
+        let point = CoordinateSpace.clampToScreens(appKitPoint)
+        move(to: point)
         usleep(30000) // Allow web UI to process hover state (e.g. YouTube controls)
         let down = mouseDownType(for: button)
         let up = mouseUpType(for: button)
-        postMouse(type: down, at: appKitPoint, button: button, clickCount: count)
+        postMouse(type: down, at: point, button: button, clickCount: count)
         usleep(50000) // Increase click duration to ensure JS registers a valid click
-        postMouse(type: up, at: appKitPoint, button: button, clickCount: count)
+        postMouse(type: up, at: point, button: button, clickCount: count)
+    }
+
+    /// Free mode runs inside the CGEventTap callback, where 80ms of sleep risks
+    /// `tapDisabledByTimeout` and stalls every other key for the duration. The
+    /// sleeps themselves are load-bearing — they give web UI time to register
+    /// hover state — so they move to a background queue rather than being
+    /// removed. `click` stays synchronous because the overlay replays and hides
+    /// around it and depends on the click having already landed.
+    func clickAsync(at appKitPoint: CGPoint, button: CGMouseButton = .left, count: Int64 = 1) {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            self?.click(at: appKitPoint, button: button, count: count)
+        }
     }
 
     func toggleDrag(at appKitPoint: CGPoint) {
+        let point = CoordinateSpace.clampToScreens(appKitPoint)
         if isDragging {
-            moveDrag(to: appKitPoint)
-            postMouse(type: .leftMouseUp, at: appKitPoint, button: dragButton)
+            moveDrag(to: point)
+            postMouse(type: .leftMouseUp, at: point, button: dragButton)
             isDragging = false
         } else {
             dragButton = .left
-            move(to: appKitPoint)
-            postMouse(type: .leftMouseDown, at: appKitPoint, button: dragButton)
+            move(to: point)
+            postMouse(type: .leftMouseDown, at: point, button: dragButton)
             isDragging = true
         }
     }
@@ -334,16 +370,51 @@ final class MouseController {
 }
 
 enum CoordinateSpace {
-    static var primaryScreenHeight: CGFloat {
-        NSScreen.screens.first?.frame.height ?? 0
+    /// AppKit's global space is y-up with its origin at the bottom-left of the
+    /// *primary* display; Quartz's global display space is y-down with its origin
+    /// at the top-left of that same display. The flip therefore happens around
+    /// the primary display's top edge.
+    ///
+    /// This used to read `NSScreen.screens.first?.frame.height`, which is only
+    /// correct when the first entry happens to be the primary display — array
+    /// order is not guaranteed. On a multi-display setup it silently shifted
+    /// every warp, so ask CoreGraphics which display is primary.
+    static var flipOrigin: CGFloat {
+        let mainID = CGMainDisplayID()
+        let screens = NSScreen.screens
+        let main = screens.first { screen in
+            (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)
+                == NSNumber(value: mainID)
+        }
+        return (main ?? screens.first)?.frame.maxY ?? 0
     }
 
     static func appKitToQuartz(_ point: CGPoint) -> CGPoint {
-        return CGPoint(x: point.x, y: primaryScreenHeight - point.y)
+        return CGPoint(x: point.x, y: flipOrigin - point.y)
     }
 
     static func quartzToAppKit(_ point: CGPoint) -> CGPoint {
-        return CGPoint(x: point.x, y: primaryScreenHeight - point.y)
+        return CGPoint(x: point.x, y: flipOrigin - point.y)
+    }
+
+    /// Union of every display frame, in AppKit space.
+    static var screenBounds: CGRect {
+        let frames = NSScreen.screens.map(\.frame)
+        guard let first = frames.first else { return .zero }
+        return frames.dropFirst().reduce(first) { $0.union($1) }
+    }
+
+    /// Keeps a point inside the visible desktop. Without this the cursor can be
+    /// warped off-screen by `CGWarpMouseCursorPosition`, which accepts out-of-bounds
+    /// coordinates and where the window server will not pull it back — leaving an
+    /// invisible cursor and clicks that land nowhere.
+    static func clampToScreens(_ point: CGPoint) -> CGPoint {
+        let bounds = screenBounds
+        guard bounds.width > 0, bounds.height > 0 else { return point }
+        return CGPoint(
+            x: min(max(point.x, bounds.minX), bounds.maxX - 1),
+            y: min(max(point.y, bounds.minY), bounds.maxY - 1)
+        )
     }
 }
 
@@ -1072,13 +1143,19 @@ final class OverlayView: NSView {
 final class FreeModeController {
     private let settingsStore: SettingsStore
     private let mouse: MouseController
+    private let onStateChange: (Bool) -> Void
     private var active = false
 
     var isActive: Bool { active }
 
-    init(settingsStore: SettingsStore, mouse: MouseController) {
+    init(
+        settingsStore: SettingsStore,
+        mouse: MouseController,
+        onStateChange: @escaping (Bool) -> Void = { _ in }
+    ) {
         self.settingsStore = settingsStore
         self.mouse = mouse
+        self.onStateChange = onStateChange
     }
 
     func toggle() {
@@ -1086,51 +1163,131 @@ final class FreeModeController {
     }
 
     func enter() {
+        guard !active else { return }
         active = true
-        ToastWindow.shared.show("Free mode")
+        onStateChange(true)
+        FreeModeBadge.shared.show()
+        ToastWindow.shared.show("Free mode on")
     }
 
     func exit() {
+        guard active else { return }
         active = false
+        onStateChange(false)
+        FreeModeBadge.shared.hide()
         ToastWindow.shared.show("Free mode off")
     }
 
-    func handle(label: String) -> Bool {
+    /// Letter keys are matched in their lowercase form only. Holding Shift — or
+    /// leaving Caps Lock on — makes the key produce an uppercase letter, and those
+    /// fall through without acting, so a stray shifted press never moves the
+    /// cursor. Arrows and Space are unaffected since they have no case.
+    func handle(label: String, flags: CGEventFlags) -> Bool {
         guard active else { return false }
+        let isLowercase = !flags.contains(.maskShift) && !flags.contains(.maskAlphaShift)
         let step = CGFloat(settingsStore.settings.freeModeStep)
-        var point = NSEvent.mouseLocation
+        let point = NSEvent.mouseLocation
 
         switch label {
         case "Escape":
             exit()
-        case "H", "ArrowLeft":
-            point.x -= step
-            mouse.move(to: point)
-        case "L", "ArrowRight":
-            point.x += step
-            mouse.move(to: point)
-        case "K", "ArrowUp":
-            point.y += step
-            mouse.move(to: point)
-        case "J", "ArrowDown":
-            point.y -= step
-            mouse.move(to: point)
+        case "ArrowLeft":
+            mouse.move(to: CGPoint(x: point.x - step, y: point.y))
+        case "ArrowRight":
+            mouse.move(to: CGPoint(x: point.x + step, y: point.y))
+        case "ArrowUp":
+            mouse.move(to: CGPoint(x: point.x, y: point.y + step))
+        case "ArrowDown":
+            mouse.move(to: CGPoint(x: point.x, y: point.y - step))
         case "Space":
-            mouse.click(at: point)
-        case "R":
-            mouse.click(at: point, button: .right)
-        case "U":
-            mouse.scroll(vertical: settingsStore.settings.scrollStep)
-        case "D":
-            mouse.scroll(vertical: -settingsStore.settings.scrollStep)
-        case "Y":
-            mouse.scroll(vertical: 0, horizontal: -settingsStore.settings.scrollStep)
-        case "O":
-            mouse.scroll(vertical: 0, horizontal: settingsStore.settings.scrollStep)
+            mouse.clickAsync(at: point)
         default:
-            break
+            guard isLowercase else { return true }
+            switch label {
+            // WASD, laid out the way a game does it. `d` used to be scroll-down,
+            // so scrolling moved to , . / m to stay clear of the movement cluster.
+            case "A":
+                mouse.move(to: CGPoint(x: point.x - step, y: point.y))
+            case "D":
+                mouse.move(to: CGPoint(x: point.x + step, y: point.y))
+            case "W":
+                mouse.move(to: CGPoint(x: point.x, y: point.y + step))
+            case "S":
+                mouse.move(to: CGPoint(x: point.x, y: point.y - step))
+            case "Q":
+                exit()
+            case "R":
+                mouse.clickAsync(at: point, button: .right)
+            case ",":
+                mouse.scroll(vertical: settingsStore.settings.scrollStep)
+            case ".":
+                mouse.scroll(vertical: -settingsStore.settings.scrollStep)
+            case "/":
+                mouse.scroll(vertical: 0, horizontal: -settingsStore.settings.scrollStep)
+            case "M":
+                mouse.scroll(vertical: 0, horizontal: settingsStore.settings.scrollStep)
+            default:
+                break
+            }
         }
         return true
+    }
+}
+
+/// Stays on screen for as long as free mode is active. Free mode swallows every
+/// keystroke, so without an always-visible cue the only way to notice it is that
+/// typing stopped working.
+final class FreeModeBadge: NSPanel {
+    static let shared = FreeModeBadge()
+
+    private init() {
+        let frame = CGRect(x: 0, y: 0, width: 260, height: 58)
+        super.init(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        level = .floating
+        backgroundColor = .clear
+        isOpaque = false
+        hasShadow = true
+        ignoresMouseEvents = true
+        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+
+        let visual = NSVisualEffectView(frame: frame)
+        visual.material = .hudWindow
+        visual.blendingMode = .behindWindow
+        visual.state = .active
+        visual.wantsLayer = true
+        visual.layer?.cornerRadius = 10
+        visual.layer?.borderWidth = 1.5
+        visual.layer?.borderColor = NSColor.systemOrange.withAlphaComponent(0.65).cgColor
+
+        let title = NSTextField(labelWithString: "FREE MODE")
+        title.font = .systemFont(ofSize: 15, weight: .bold)
+        title.textColor = .systemOrange
+
+        let hint = NSTextField(labelWithString: "w a s d move  ·  space click  ·  q exit")
+        hint.font = .systemFont(ofSize: 12)
+        hint.textColor = .secondaryLabelColor
+
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .centerX
+        stack.spacing = 2
+        stack.frame = frame
+        stack.autoresizingMask = [.width, .height]
+        stack.addArrangedSubview(title)
+        stack.addArrangedSubview(hint)
+
+        visual.addSubview(stack)
+        contentView = visual
+    }
+
+    func show() {
+        guard let screen = NSScreen.main else { return }
+        setFrameOrigin(CGPoint(x: screen.frame.midX - frame.width / 2, y: screen.frame.maxY - 78))
+        orderFrontRegardless()
+    }
+
+    func hide() {
+        orderOut(nil)
     }
 }
 
@@ -1187,6 +1344,12 @@ final class PreferencesWindowController: NSWindowController {
     private let speedSlider = NSSlider(value: 26, minValue: 6, maxValue: 90, target: nil, action: nil)
     private let continuousCheckbox = NSButton(checkboxWithTitle: "Keep overlay visible after actions", target: nil, action: nil)
     private let launchAtStartupCheckbox = NSButton(checkboxWithTitle: "Launch at Startup", target: nil, action: nil)
+    private let freeModeKeyField = NSTextField(string: "T")
+    private let freeModeCommandCheckbox = NSButton(checkboxWithTitle: "Command", target: nil, action: nil)
+    private let freeModeOptionCheckbox = NSButton(checkboxWithTitle: "Option", target: nil, action: nil)
+    private let freeModeControlCheckbox = NSButton(checkboxWithTitle: "Control", target: nil, action: nil)
+    private let freeModeShiftCheckbox = NSButton(checkboxWithTitle: "Shift", target: nil, action: nil)
+    private let freeModePreview = NSTextField(labelWithString: "Option+T")
     private let shortcutKeyField = NSTextField(string: "U")
     private let shortcutCommandCheckbox = NSButton(checkboxWithTitle: "Command", target: nil, action: nil)
     private let shortcutOptionCheckbox = NSButton(checkboxWithTitle: "Option", target: nil, action: nil)
@@ -1241,6 +1404,16 @@ final class PreferencesWindowController: NSWindowController {
         continuousCheckbox.action = #selector(updateContinuous)
         launchAtStartupCheckbox.target = self
         launchAtStartupCheckbox.action = #selector(updateLaunchAtStartup)
+        freeModeKeyField.target = self
+        freeModeKeyField.action = #selector(updateFreeModeShortcut)
+        freeModeCommandCheckbox.target = self
+        freeModeCommandCheckbox.action = #selector(updateFreeModeShortcut)
+        freeModeOptionCheckbox.target = self
+        freeModeOptionCheckbox.action = #selector(updateFreeModeShortcut)
+        freeModeControlCheckbox.target = self
+        freeModeControlCheckbox.action = #selector(updateFreeModeShortcut)
+        freeModeShiftCheckbox.target = self
+        freeModeShiftCheckbox.action = #selector(updateFreeModeShortcut)
         shortcutKeyField.target = self
         shortcutKeyField.action = #selector(updateShortcut)
         shortcutCommandCheckbox.target = self
@@ -1259,11 +1432,12 @@ final class PreferencesWindowController: NSWindowController {
         stack.addArrangedSubview(row("Overlay opacity", opacitySlider))
         stack.addArrangedSubview(row("Free-mode step", speedSlider))
         stack.addArrangedSubview(shortcutRow())
+        stack.addArrangedSubview(freeModeShortcutRow())
         stack.addArrangedSubview(quitGridKeyRow())
         stack.addArrangedSubview(continuousCheckbox)
         stack.addArrangedSubview(launchAtStartupCheckbox)
 
-        let hint = NSTextField(labelWithString: "Overlay shortcut defaults to Option+U. Free mode is available from the status-bar menu.")
+        let hint = NSTextField(labelWithString: "Overlay shortcut defaults to Option+U, free mode shortcut to Option+T. Esc always exits free mode.")
         hint.font = .systemFont(ofSize: 12)
         hint.textColor = .secondaryLabelColor
         stack.addArrangedSubview(hint)
@@ -1327,6 +1501,43 @@ final class PreferencesWindowController: NSWindowController {
         return view
     }
 
+    private func freeModeShortcutRow() -> NSView {
+        let view = NSStackView()
+        view.orientation = .horizontal
+        view.spacing = 12
+
+        let label = NSTextField(labelWithString: "Free mode shortcut")
+        label.widthAnchor.constraint(equalToConstant: 130).isActive = true
+
+        let controls = NSStackView()
+        controls.orientation = .vertical
+        controls.spacing = 8
+
+        let modifierRow = NSStackView()
+        modifierRow.orientation = .horizontal
+        modifierRow.spacing = 10
+        modifierRow.addArrangedSubview(freeModeOptionCheckbox)
+        modifierRow.addArrangedSubview(freeModeCommandCheckbox)
+        modifierRow.addArrangedSubview(freeModeControlCheckbox)
+        modifierRow.addArrangedSubview(freeModeShiftCheckbox)
+
+        let keyRow = NSStackView()
+        keyRow.orientation = .horizontal
+        keyRow.spacing = 8
+        let keyLabel = NSTextField(labelWithString: "Key")
+        freeModeKeyField.widthAnchor.constraint(equalToConstant: 70).isActive = true
+        freeModePreview.textColor = .secondaryLabelColor
+        keyRow.addArrangedSubview(keyLabel)
+        keyRow.addArrangedSubview(freeModeKeyField)
+        keyRow.addArrangedSubview(freeModePreview)
+
+        controls.addArrangedSubview(modifierRow)
+        controls.addArrangedSubview(keyRow)
+        view.addArrangedSubview(label)
+        view.addArrangedSubview(controls)
+        return view
+    }
+
     private func quitGridKeyRow() -> NSView {
         let view = NSStackView()
         view.orientation = .horizontal
@@ -1354,6 +1565,12 @@ final class PreferencesWindowController: NSWindowController {
         speedSlider.doubleValue = settings.freeModeStep
         continuousCheckbox.state = settings.continuousMode ? .on : .off
         launchAtStartupCheckbox.state = LaunchAtStartup.isEnabled ? .on : .off
+        freeModeKeyField.stringValue = settings.freeModeHotkey.key
+        freeModeCommandCheckbox.state = settings.freeModeHotkey.command ? .on : .off
+        freeModeOptionCheckbox.state = settings.freeModeHotkey.option ? .on : .off
+        freeModeControlCheckbox.state = settings.freeModeHotkey.control ? .on : .off
+        freeModeShiftCheckbox.state = settings.freeModeHotkey.shift ? .on : .off
+        freeModePreview.stringValue = settings.freeModeHotkey.displayName
         shortcutKeyField.stringValue = settings.overlayHotkey.key
         shortcutCommandCheckbox.state = settings.overlayHotkey.command ? .on : .off
         shortcutOptionCheckbox.state = settings.overlayHotkey.option ? .on : .off
@@ -1395,6 +1612,20 @@ final class PreferencesWindowController: NSWindowController {
         launchAtStartupCheckbox.state = LaunchAtStartup.isEnabled ? .on : .off
     }
 
+    @objc private func updateFreeModeShortcut() {
+        let updated = Hotkey.fromInput(
+            freeModeKeyField.stringValue,
+            command: freeModeCommandCheckbox.state == .on,
+            option: freeModeOptionCheckbox.state == .on,
+            control: freeModeControlCheckbox.state == .on,
+            shift: freeModeShiftCheckbox.state == .on
+        )
+        guard let updated else { return }
+        settingsStore.settings.freeModeHotkey = updated
+        freeModePreview.stringValue = updated.displayName
+        onChange()
+    }
+
     @objc private func updateShortcut() {
         guard let hotkey = Hotkey.fromInput(
             shortcutKeyField.stringValue,
@@ -1427,6 +1658,7 @@ final class PreferencesWindowController: NSWindowController {
 
 final class StatusBarController {
     private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+    private var freeModeItem: CallbackMenuItem!
 
     init(showOverlay: @escaping () -> Void, toggleFreeMode: @escaping () -> Void, preferences: @escaping () -> Void) {
         if let icon = loadTrayIcon() {
@@ -1441,7 +1673,7 @@ final class StatusBarController {
 
         let menu = NSMenu()
         menu.addCallbackItem(title: "Show Overlay", action: showOverlay)
-        menu.addCallbackItem(title: "Toggle Free Mode", action: toggleFreeMode)
+        let freeModeItem = menu.addCallbackItem(title: "Free Mode", action: toggleFreeMode)
         menu.addItem(.separator())
         menu.addCallbackItem(title: "Preferences...", action: preferences)
         let startupItem = NSMenuItem(title: "Launch at Startup", action: nil, keyEquivalent: "")
@@ -1452,6 +1684,17 @@ final class StatusBarController {
         menu.addItem(.separator())
         menu.addCallbackItem(title: "Quit \(appName)") { NSApp.terminate(nil) }
         item.menu = menu
+
+        self.freeModeItem = freeModeItem
+        updateFreeModeState(false)
+    }
+
+    /// Free mode swallows every keystroke while active, so the only reliable way
+    /// to tell it is on is to look. The checkmark and tooltip persist for as long
+    /// as the mode does, rather than relying on the toast that fades after 1.2s.
+    func updateFreeModeState(_ active: Bool) {
+        freeModeItem.state = active ? .on : .off
+        item.button?.toolTip = active ? "\(appName) — free mode on" : appName
     }
 
     @objc private func toggleLaunchAtStartup() {
@@ -1489,8 +1732,11 @@ private final class CallbackMenuItem: NSMenuItem {
 }
 
 extension NSMenu {
-    func addCallbackItem(title: String, action: @escaping () -> Void) {
-        addItem(CallbackMenuItem(title: title, callback: action))
+    @discardableResult
+    fileprivate func addCallbackItem(title: String, action: @escaping () -> Void) -> CallbackMenuItem {
+        let callbackItem = CallbackMenuItem(title: title, callback: action)
+        addItem(callbackItem)
+        return callbackItem
     }
 }
 
@@ -1517,7 +1763,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, EventTapDelegate {
     private let eventTap = EventTapManager()
     private let mouse = MouseController()
     private lazy var overlay = OverlayController(settingsStore: settingsStore, mouse: mouse)
-    private lazy var freeMode = FreeModeController(settingsStore: settingsStore, mouse: mouse)
+    private lazy var freeMode = FreeModeController(
+        settingsStore: settingsStore,
+        mouse: mouse,
+        onStateChange: { [weak self] active in self?.statusBar?.updateFreeModeState(active) }
+    )
     private var statusBar: StatusBarController?
     private var preferences: PreferencesWindowController?
 
@@ -1572,6 +1822,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, EventTapDelegate {
         }
         guard let label else { return false }
 
+        // Checked ahead of the overlay branch and the free-mode swallow so the
+        // toggle works in every state — including turning free mode back off,
+        // which would otherwise never reach it.
+        if type == .keyDown,
+           !isRepeat,
+           settingsStore.settings.freeModeHotkey.matches(label: label, flags: flags) {
+            freeMode.toggle()
+            return true
+        }
+
         if type == .keyDown && settingsStore.settings.overlayHotkey.matches(label: label, flags: flags) {
             overlay.toggle()
             return true
@@ -1590,7 +1850,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, EventTapDelegate {
         }
 
         if freeMode.isActive {
-            return freeMode.handle(label: label)
+            return freeMode.handle(label: label, flags: flags)
         }
 
         return false
